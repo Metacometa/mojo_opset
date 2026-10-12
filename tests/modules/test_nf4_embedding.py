@@ -51,15 +51,15 @@ def make_nf4_case(dim, device):
 @pytest.mark.api("modules.NF4DequantEmbedding", ops=["embedding_nf4_dequant"])
 @pytest.mark.parametrize("dim", NF4_DIMS)
 @pytest.mark.accuracy
-def test_nf4(accuracy_backend, dim):
+def test_embedding_nf4_dequant_accuracy(accuracy_backend, dim):
     implementation, _, device = accuracy_backend
     ids, *weights = make_nf4_case(dim, device)
     actual = modules.NF4DequantEmbedding(
         *weights, group_size=64, output_dtype=torch.float32, implementation=implementation
     )(ids)
-    expected = modules.NF4DequantEmbedding(
-        *weights, group_size=64, output_dtype=torch.float32, implementation="torch"
-    )(ids)
+    expected = modules.NF4DequantEmbedding(*weights, group_size=64, output_dtype=torch.float32, implementation="torch")(
+        ids
+    )
     assert_close(actual, expected, rtol=0, atol=1e-5)
 
 
@@ -89,7 +89,7 @@ def _encoding_modules(case, device, implementation):
 @pytest.mark.api("modules.OverEncoding", ops=["over_encoding_decode"])
 @pytest.mark.parametrize("case", ENCODING_CASES)
 @pytest.mark.accuracy
-def test_encoding(accuracy_backend, case):
+def test_over_encoding_decode_accuracy(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     actual, reference, inputs = _encoding_modules(case, device, implementation)
     with torch.no_grad():

@@ -312,7 +312,7 @@ def _business_inputs(
     "batch_size,q_head,kv_head,head_dim,data_lens,data_types,sliding_windows,global_windows,dtype,mask_func",
     BUSINESS_FLEX_CASES,
 )
-def test_business(
+def test_flex_attention_accuracy(
     accuracy_backend,
     batch_size,
     q_head,

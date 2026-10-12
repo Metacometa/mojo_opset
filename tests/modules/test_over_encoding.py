@@ -111,7 +111,7 @@ def make_encoding_case(case, device):
 @pytest.mark.api("modules.OverEncodingNGram", ops=["n_gram_prefill", "n_gram_decode"])
 @pytest.mark.parametrize("case", NGRAM_CASES)
 @pytest.mark.accuracy
-def test_ngram(accuracy_backend, case):
+def test_n_gram_accuracy(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     ids, history, lens, sizes, _, grams, vocab = make_ngram_case(case, device)
     module = modules.OverEncodingNGram(vocab, sizes, grams, implementation=implementation).to(device)
@@ -145,7 +145,7 @@ def _encoding_modules(case, device, implementation):
 @pytest.mark.api("modules.OverEncoding", ops=["over_encoding_decode"])
 @pytest.mark.parametrize("case", ENCODING_CASES)
 @pytest.mark.accuracy
-def test_encoding(accuracy_backend, case):
+def test_over_encoding_decode_accuracy(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     actual, reference, inputs = _encoding_modules(case, device, implementation)
     with torch.no_grad():

@@ -25,7 +25,7 @@ def make_store_case(shape, tokens, device):
 @pytest.mark.parametrize("shape", STORE_SHAPES)
 @pytest.mark.parametrize("tokens", STORE_LENGTHS)
 @pytest.mark.accuracy
-def test_store(accuracy_backend, shape, tokens):
+def test_store_lowrank_accuracy(accuracy_backend, shape, tokens):
     implementation, _, device = accuracy_backend
     cache, *inputs = make_store_case(shape, tokens, device)
     actual = modules.StoreLowrank(implementation=implementation)(cache, *inputs, tokens)

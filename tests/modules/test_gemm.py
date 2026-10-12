@@ -22,9 +22,7 @@ def make_quant_batch(case, device):
 def batch_case(case, device, impl):
     x, w, s1, s2 = make_quant_batch(case, device)
     call = M.QuantBatchGemmReduceSum(w, case[4], implementation=impl)
-    ref = lambda a, b, c: F.quant_batch_gemm_reduce_sum(
-        a, w, b, c, trans_weight=case[4], implementation="torch"
-    )
+    ref = lambda a, b, c: F.quant_batch_gemm_reduce_sum(a, w, b, c, trans_weight=case[4], implementation="torch")
     return (call, ref, (x, s1, s2))
 
 
@@ -133,7 +131,7 @@ QUANT_GEMM_CASES = [(1, 4096, 4096), (32, 4096, 11008), (128, 2048, 4096), (64, 
 @pytest.mark.api("modules.GroupGemm", ops=["group_gemm"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case,dtype", GROUP_GEMM_TYPED_CASES)
-def test_group(accuracy_backend, case, dtype):
+def test_group_gemm_accuracy(accuracy_backend, case, dtype):
     impl, _, device = accuracy_backend
     call, ref, inputs = group_case(case, dtype, device, impl)
     check_group(call(*inputs), ref(*inputs), case, dtype)
@@ -144,7 +142,7 @@ def test_group(accuracy_backend, case, dtype):
 @pytest.mark.parametrize("case", QUANT_GEMM_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("transposed", [False, True])
-def test_quant(accuracy_backend, case, dtype, transposed):
+def test_quant_gemm_accuracy(accuracy_backend, case, dtype, transposed):
     impl, _, device = accuracy_backend
     call, ref, inputs = quant_case(case, dtype, transposed, device, impl)
     assert_close(call(*inputs), ref(*inputs), dtype, rtol=1e-2, atol=1e-2)
@@ -153,7 +151,7 @@ def test_quant(accuracy_backend, case, dtype, transposed):
 @pytest.mark.api("modules.QuantBatchGemmReduceSum", ops=["quant_batch_gemm_reduce_sum"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", QUANT_BATCH_CASES)
-def test_batch(accuracy_backend, case):
+def test_quant_batch_gemm_reduce_sum_accuracy(accuracy_backend, case):
     impl, _, device = accuracy_backend
     skip_batch(impl, device)
     call, ref, inputs = batch_case(case, device, impl)
@@ -161,8 +159,7 @@ def test_batch(accuracy_backend, case):
 
 
 @pytest.mark.api("modules.QuantGemm", ops=["quant_gemm"])
-@pytest.mark.accuracy
-def test_registered_weight(accuracy_backend):
+def test_quant_gemm_registers_weight_buffers(accuracy_backend):
     from mojo_opset.modules import QuantGemm
 
     _, _, device = accuracy_backend
@@ -173,10 +170,9 @@ def test_registered_weight(accuracy_backend):
 
 
 @pytest.mark.api("modules.QuantGemm", ops=["quant_gemm"])
-@pytest.mark.accuracy
 @pytest.mark.parametrize("transposed", [False, True])
 @pytest.mark.parametrize("compiled", [False, True])
-def test_quant_weight_reuse_and_updates(accuracy_backend, monkeypatch, transposed, compiled):
+def test_quant_gemm_invalidates_weight_cache(accuracy_backend, monkeypatch, transposed, compiled):
     import importlib
 
     impl, target, device = accuracy_backend
@@ -200,8 +196,13 @@ def test_quant_weight_reuse_and_updates(accuracy_backend, monkeypatch, transpose
 
     def check(expected_preparations):
         expected = F.quant_gemm(
-            x, module.weight, xs, module.weight_scale, output_dtype=torch.bfloat16,
-            trans_weight=transposed, implementation="torch",
+            x,
+            module.weight,
+            xs,
+            module.weight_scale,
+            output_dtype=torch.bfloat16,
+            trans_weight=transposed,
+            implementation="torch",
         )
         for _ in range(2):
             assert_close(call(x, xs), expected, torch.bfloat16, rtol=1e-2, atol=1e-2)

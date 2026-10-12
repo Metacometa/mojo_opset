@@ -58,7 +58,7 @@ def make_swa_infer_case(batch, q_heads, kv_heads, dim, max_q, max_cache, dtype, 
 @pytest.mark.parametrize("batch,q_heads,kv_heads,dim,max_q,max_cache,dtype", SWA_INFER_CASES)
 @pytest.mark.parametrize("layout,global_window,local_window", SWA_INFER_WINDOWS)
 @pytest.mark.accuracy
-def test_swa_infer(
+def test_swa_infer_accuracy(
     accuracy_backend, batch, q_heads, kv_heads, dim, max_q, max_cache, dtype, layout, global_window, local_window
 ):
     implementation, _, device = accuracy_backend
@@ -81,7 +81,7 @@ def test_swa_infer(
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("interleave", [False, True])
 @pytest.mark.accuracy
-def test_varlen_fa(accuracy_backend, causal, interleave):
+def test_varlen_fa_infer_accuracy(accuracy_backend, causal, interleave):
     implementation, _, device = accuracy_backend
     inputs = make_varlen_fa_module_inputs(device)
     module = modules.VarlenFAInfer(causal, interleave, implementation=implementation)

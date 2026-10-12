@@ -32,7 +32,7 @@ def make_indexer_case(shape, dtype, device):
 @pytest.mark.parametrize("shape", INDEXER_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
-def test_indexer(accuracy_backend, shape, dtype):
+def test_lightning_indexer_accuracy(accuracy_backend, shape, dtype):
     implementation, _, device = accuracy_backend
     inputs = make_indexer_case(shape, dtype, device)
     actual = functions.lightning_indexer(*inputs, implementation=implementation)

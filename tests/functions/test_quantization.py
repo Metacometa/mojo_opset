@@ -43,7 +43,7 @@ def make_static_quant_case(shape, scale_shape, dtype, device):
 @pytest.mark.parametrize("shape,scale_shape", STATIC_QUANT_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
-def test_static(accuracy_backend, shape, scale_shape, dtype):
+def test_static_quant_accuracy(accuracy_backend, shape, scale_shape, dtype):
     impl, _, device = accuracy_backend
     x, scale = make_static_quant_case(shape, scale_shape, dtype, device)
     actual, returned_scale = F.static_quant(x, scale, implementation=impl)
@@ -56,7 +56,7 @@ def test_static(accuracy_backend, shape, scale_shape, dtype):
 @pytest.mark.parametrize("shape,scale_shape", DEQUANT_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
-def test_dequant(accuracy_backend, shape, scale_shape, dtype):
+def test_dequant_accuracy(accuracy_backend, shape, scale_shape, dtype):
     impl, _, device = accuracy_backend
     x, scale = make_static_quant_case(shape, scale_shape, dtype, device)
     quantized, _ = F.static_quant(x, scale, implementation="torch")
@@ -76,7 +76,7 @@ def test_dequant(accuracy_backend, shape, scale_shape, dtype):
     + [pytest.param(shape, torch.bfloat16, True, id=f"zero-{shape}") for shape in ((128,), (0, 128), (2, 128))],
 )
 @pytest.mark.accuracy
-def test_dynamic(accuracy_backend, shape, dtype, zero):
+def test_dynamic_quant_accuracy(accuracy_backend, shape, dtype, zero):
     impl, _, device = accuracy_backend
     x = torch.zeros(shape, dtype=dtype, device=device) if zero else torch.randn(shape, dtype=dtype, device=device)
     smooth = None if zero else (torch.rand(shape[-1], device=device) + 0.1).reciprocal()

@@ -37,7 +37,7 @@ def moe_case(case, dtype, device, impl):
 @pytest.mark.parametrize("case", MOE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("cpu_counts", [False, True], ids=["device_counts", "cpu_counts"])
-def test_moe(accuracy_backend, case, dtype, cpu_counts):
+def test_moe_dynamic_quant_accuracy(accuracy_backend, case, dtype, cpu_counts):
     impl, _, device = accuracy_backend
     call, reference, inputs = moe_case(case, dtype, device, impl)
     if cpu_counts:

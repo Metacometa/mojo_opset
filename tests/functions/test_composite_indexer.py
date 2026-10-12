@@ -69,13 +69,11 @@ def _run_composite(module, inputs):
     )
 
 
-@pytest.mark.api(
-    "functions.indexer", ops=["layer_norm_infer", "rope_infer", "dynamic_quant", "lightning_indexer"]
-)
+@pytest.mark.api("functions.indexer", ops=["layer_norm_infer", "rope_infer", "dynamic_quant", "lightning_indexer"])
 @pytest.mark.parametrize("case", COMPOSITE_CASES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
-def test_composite(accuracy_backend, case, dtype):
+def test_indexer_accuracy(accuracy_backend, case, dtype):
     implementation, _, device = accuracy_backend
     actual, reference, inputs = make_composite_case(case, dtype, device, implementation)
     with torch.no_grad():

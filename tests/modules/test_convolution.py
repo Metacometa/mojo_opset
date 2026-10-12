@@ -9,7 +9,7 @@ from tests._checks import assert_close
 @pytest.mark.api("modules.CausalConv1dUpdateStateInfer", ops=["causal_conv1d_update_state_infer"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.accuracy
-def test_update(accuracy_backend, dtype):
+def test_causal_conv1d_update_state_infer_accuracy(accuracy_backend, dtype):
     implementation, _, device = accuracy_backend
     x = torch.randn(2, 64, 3, device=device, dtype=dtype)
     state = torch.randn(2, 64, 4, device=device, dtype=dtype)

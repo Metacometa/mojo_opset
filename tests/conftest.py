@@ -61,8 +61,12 @@ def pytest_collection_modifyitems(config, items):
     check = config.getoption("--check")
     if check == "all":
         return
-    other = "bitwise" if check == "accuracy" else "accuracy"
-    deselected = [item for item in items if item.get_closest_marker(other)]
+    operator_roots = (Path(__file__).parent / "functions", Path(__file__).parent / "modules")
+    deselected = [
+        item
+        for item in items
+        if any(item.path.is_relative_to(root) for root in operator_roots) and not item.get_closest_marker(check)
+    ]
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         excluded = set(deselected)

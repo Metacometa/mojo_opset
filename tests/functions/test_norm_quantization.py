@@ -68,50 +68,43 @@ def norm_case(shape, dtype, mode, device, impl, *, fp8=False, smooth=False, affi
         scale = smoothed.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / qmax
         quantized = (smoothed / scale).round().clamp(qmin, qmax).to(quant_dtype)
         if not fp8:
-            torch.testing.assert_close(actual[0], quantized, atol=0, rtol=0)
-        torch.testing.assert_close(actual[-1], scale, atol=0, rtol=0)
+            assert_close(actual[0], quantized, atol=0, rtol=0)
+        assert_close(actual[-1], scale, atol=0, rtol=0)
         if pos is not None:
             residual_out = normed if pos == "post" and "rms" in name else summed
-            torch.testing.assert_close(actual[1], residual_out, atol=0, rtol=0)
+            assert_close(actual[1], residual_out, atol=0, rtol=0)
         return actual
 
     return (call, reference, inputs)
 
 
 @pytest.mark.accuracy
-@pytest.mark.parametrize("shape", NORM_SHAPES)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "mode", [pytest.param(mode, marks=pytest.mark.api("functions." + mode[0])) for mode in NORM_MODES]
 )
-def test_norm(accuracy_backend, shape, dtype, mode):
+@pytest.mark.parametrize(
+    "shape,dtype,smooth,affine,symmetric",
+    [(shape, dtype, False, True, True) for shape in NORM_SHAPES for dtype in (torch.float16, torch.bfloat16)]
+    + [
+        ((2, 256), torch.float16, True, affine, symmetric)
+        for affine, symmetric in ((True, True), (False, True), (True, False))
+    ],
+)
+def test_norm_quantization_accuracy(accuracy_backend, mode, shape, dtype, smooth, affine, symmetric):
     impl, _, device = accuracy_backend
-    call, reference, inputs = norm_case(shape, dtype, mode, device, impl)
+    call, reference, inputs = norm_case(
+        shape, dtype, mode, device, impl, smooth=smooth, affine=affine, symmetric=symmetric
+    )
     check_norm(call(*inputs), reference(*inputs), mode, dtype)
 
 
 @pytest.mark.reference
-@pytest.mark.accuracy
-@pytest.mark.parametrize("shape", NORM_SHAPES[:2])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mode", NORM_MODES)
-def test_fp8_reference(shape, dtype, mode):
+def test_norm_quantization_fp8_reference_output_metadata(dtype, mode):
+    shape = (2, 256)
     # The original FP8 norm-quant tests run on CPU, not unsupported NPU kernels.
     call, _, inputs = norm_case(shape, dtype, mode, "cpu", "torch", fp8=True)
     output = call(*inputs)
     assert output[0].dtype == torch.float8_e4m3fn
     assert output[0].shape == shape and output[-1].shape == (*shape[:-1], 1)
-
-
-@pytest.mark.accuracy
-@pytest.mark.parametrize(
-    "mode", [pytest.param(mode, marks=pytest.mark.api("functions." + mode[0])) for mode in NORM_MODES]
-)
-@pytest.mark.parametrize("affine,symmetric", [(True, True), (False, True), (True, False)])
-def test_norm_options(accuracy_backend, mode, affine, symmetric):
-    # Cover the public smoothing/affine flags in addition to the inherited matrix.
-    impl, _, device = accuracy_backend
-    call, reference, inputs = norm_case(
-        (2, 256), torch.float16, mode, device, impl, smooth=True, affine=affine, symmetric=symmetric
-    )
-    check_norm(call(*inputs), reference(*inputs), mode, torch.float16)

@@ -5,9 +5,9 @@ import torch
 
 from mojo_opset import functions as F
 from mojo_opset.functions._dispatch import load_impl
-from tests._checks import assert_accuracy
 from tests._checks import assert_close
 from tests._checks import assert_repeatable
+from tests._checks import check_forward_backward
 from tests._compile import compile_fullgraph
 
 
@@ -50,15 +50,6 @@ def make_group(case, dtype, device):
     return x, weight, values.to(device)
 
 
-def group_case(case, dtype, device, impl):
-    if impl in ("torch_npu", "native") and dtype == torch.float32:
-        pytest.skip("torch_npu/native grouped matmul supports FP16/BF16")
-    x, weight, counts = make_group(case, dtype, device)
-    call = partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation=impl)
-    ref = partial(F.group_gemm, weight=weight, trans_weight=case[4], implementation="torch")
-    return (lambda a, b: call(a, group_list=b), lambda a, b: ref(a, group_list=b), (x, counts))
-
-
 def _make_int8_gemm_data(m, k, n, trans_weight):
     """Create quantised input/weight pairs with corresponding scales.
 
@@ -80,17 +71,6 @@ def _make_int8_gemm_data(m, k, n, trans_weight):
 
 def move_tensors(values, device):
     return tuple(value.to(device) if isinstance(value, torch.Tensor) else value for value in values)
-
-
-def quant_case(case, dtype, transposed, device, impl):
-    x, w, xs, ws = move_tensors(_make_int8_gemm_data(*case, transposed), device)
-    call = lambda a, scale: F.quant_gemm(
-        a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation=impl
-    )
-    ref = lambda a, scale: F.quant_gemm(
-        a, w, scale, ws, output_dtype=dtype, trans_weight=transposed, implementation="torch"
-    )
-    return (call, ref, (x, xs))
 
 
 def skip_batch(impl, device):
@@ -170,7 +150,7 @@ def test_group(accuracy_backend, case, dtype, backward, check):
     if check == "bitwise":
         assert_repeatable(partial(call, implementation=impl), inputs, backward=backward)
     elif backward:
-        assert_accuracy(call, inputs, implementation=impl)
+        check_forward_backward(call, inputs, implementation=impl)
     else:
         check_group(call(*inputs, implementation=impl), call(*inputs, implementation="torch"), case, dtype)
 
@@ -227,38 +207,35 @@ def test_group_input_layout(accuracy_backend, layout, transposed, dtype, trainin
 
 @pytest.mark.api("functions.quant_gemm")
 @pytest.mark.accuracy
-@pytest.mark.parametrize("case", QUANT_GEMM_CASES)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("transposed", [False, True])
-def test_quant(accuracy_backend, case, dtype, transposed):
+@pytest.mark.parametrize(
+    "case,dtype,reference_only",
+    [(case, dtype, False) for case in QUANT_GEMM_CASES for dtype in (torch.float16, torch.bfloat16)]
+    + [
+        pytest.param(case, dtype, True, marks=pytest.mark.reference)
+        for case in QUANT_GEMM_CASES[:3] + [(64, 512, 256)]
+        for dtype in (torch.float32, torch.float16, torch.bfloat16)
+    ],
+)
+def test_quant_gemm_accuracy(accuracy_backend, case, dtype, transposed, reference_only):
     impl, _, device = accuracy_backend
-    call, ref, inputs = quant_case(case, dtype, transposed, device, impl)
-    assert_close(call(*inputs), ref(*inputs), dtype, rtol=1e-2, atol=1e-2)
+    x, weight, xscale, wscale = move_tensors(_make_int8_gemm_data(*case, transposed), device)
+    options = dict(output_dtype=dtype, trans_weight=transposed)
+    actual = F.quant_gemm(x, weight, xscale, wscale, implementation="torch" if reference_only else impl, **options)
+    if reference_only:
+        w = weight.t() if transposed else weight
+        expected = ((x.float() @ w.float()) * xscale[:, None] * wscale.float()[None, :]).to(dtype)
+    else:
+        expected = F.quant_gemm(x, weight, xscale, wscale, implementation="torch", **options)
+    tolerance = 0 if reference_only else 1e-2
+    assert_close(actual, expected, dtype, rtol=tolerance, atol=tolerance)
 
 
 @pytest.mark.api("functions.quant_batch_gemm_reduce_sum")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", QUANT_BATCH_CASES)
-def test_batch(accuracy_backend, case):
+def test_quant_batch_gemm_reduce_sum_accuracy(accuracy_backend, case):
     impl, _, device = accuracy_backend
     skip_batch(impl, device)
     call, ref, inputs = batch_case(case, device, impl)
     assert_close(call(*inputs), ref(*inputs), torch.bfloat16, rtol=1e-2, atol=1e-1)
-
-
-@pytest.mark.reference
-@pytest.mark.accuracy
-@pytest.mark.parametrize("case", QUANT_GEMM_CASES[:3] + [(64, 512, 256)])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("transposed", [False, True])
-def test_quant_reference(accuracy_backend, case, dtype, transposed):
-    from mojo_opset import functions as F
-
-    _, _, device = accuracy_backend
-    x, weight, xscale, wscale = move_tensors(_make_int8_gemm_data(*case, transposed), device)
-    actual = F.quant_gemm(
-        x, weight, xscale, wscale, output_dtype=dtype, trans_weight=transposed, implementation="torch"
-    )
-    w = weight.t() if transposed else weight
-    expected = ((x.float() @ w.float()) * xscale[:, None] * wscale.float()[None, :]).to(dtype)
-    assert_close(actual, expected, rtol=0, atol=0)

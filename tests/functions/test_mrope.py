@@ -41,7 +41,7 @@ def make_mrope_case(case, dtype, device):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("inplace", [False, True])
 @pytest.mark.accuracy
-def test_mrope(accuracy_backend, case, dtype, inplace):
+def test_multimodal_rope_infer_accuracy(accuracy_backend, case, dtype, inplace):
     implementation, _, device = accuracy_backend
     inputs, options = make_mrope_case(case, dtype, device)
     q, k, cos, sin = inputs

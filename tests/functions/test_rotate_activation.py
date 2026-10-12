@@ -31,7 +31,7 @@ def _reference(x):
 @pytest.mark.parametrize("shape", ROTATE_SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.accuracy
-def test_rotate(accuracy_backend, shape, dtype):
+def test_rotate_activation_accuracy(accuracy_backend, shape, dtype):
     implementation, _, device = accuracy_backend
     function = _rotation(implementation)
     x = torch.randn(shape, device=device, dtype=dtype)

@@ -76,7 +76,7 @@ def _ngram_call(case, device):
     ],
 )
 @pytest.mark.accuracy
-def test_ngram(accuracy_backend, case):
+def test_n_gram_accuracy(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     function, inputs = _ngram_call(case, device)
     actual = function(*inputs, implementation=implementation)

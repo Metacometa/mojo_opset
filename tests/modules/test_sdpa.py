@@ -38,7 +38,7 @@ def make_sdpa_case(case, device):
 @pytest.mark.api("modules.Sdpa", ops=["sdpa_infer"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", SDPA_CASES)
-def test_sdpa(accuracy_backend, case):
+def test_sdpa_infer_accuracy(accuracy_backend, case):
     impl, _, device = accuracy_backend
     args = make_sdpa_case(case, device)
     actual = modules.Sdpa(case[3] ** -0.5, True, implementation=impl)(*args)

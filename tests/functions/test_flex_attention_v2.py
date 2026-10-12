@@ -43,7 +43,7 @@ def make_inputs(case, device):
 @pytest.mark.api("functions.flex_attention_v2")
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", CASES)
-def test_accuracy(accuracy_backend, case):
+def test_flex_attention_v2_accuracy(accuracy_backend, case):
     impl, device = _require_flex(accuracy_backend)
     inputs, mask, mask_mod = make_inputs(case, device)
     qidx, kidx = torch.arange(case[2], device=device)[:, None], torch.arange(case[3], device=device)[None, :]
@@ -71,7 +71,7 @@ def test_padding_after_nan_matmul(accuracy_backend, case):
         torch.mm(poison, ones)
         torch.npu.synchronize()
         torch.manual_seed(0)
-        test_accuracy(accuracy_backend, case)
+        test_flex_attention_v2_accuracy(accuracy_backend, case)
     finally:
         poison.zero_()
         torch.mm(poison, ones)

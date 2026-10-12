@@ -57,17 +57,24 @@ QUANT_CASES = [
         case,
         id=(
             f"{case[0]}-shape{case[1]}-scale{case[2]}-{str(case[3]).removeprefix('torch.')}"
-            f"-{'zeros' if case[4] else 'random'}"
+            f"-{'default' if case[5] else 'zeros' if case[4] else 'random'}"
         ),
     )
-    for case in QUANT_CASES
+    for case in [(*case, False) for case in QUANT_CASES]
+    + [(name, (3, 128), (128,), torch.bfloat16, False, True) for name in ("StaticQuant", "DynamicQuant", "Dequant")]
 ]
 
 
 def _make_quant_case(case, backend):
-    name, shape, scale_shape, dtype, zero = case
+    name, shape, scale_shape, dtype, zero, defaults = case
     implementation, _, device = backend
-    if name == "Dequant":
+    if name == "Dequant" and defaults:
+        inputs = (
+            torch.randint(-127, 127, shape, dtype=torch.int8, device=device),
+            torch.rand(shape[-1], device=device),
+        )
+        options = {}
+    elif name == "Dequant":
         x, scale = make_static_quant_case(shape, scale_shape, dtype, device)
         q, _ = functions.static_quant(x, scale, implementation="torch")
         inputs = (q, scale)
@@ -81,50 +88,19 @@ def _make_quant_case(case, backend):
     actual = getattr(modules, name)(**options, implementation=implementation)
     reference = getattr(modules, name)(**options, implementation="torch")
     with torch.no_grad():
-        if name == "StaticQuant":
+        if name == "StaticQuant" and not defaults:
             actual.scale.copy_(scale)
-        elif name == "DynamicQuant" and not zero:
+        elif name == "DynamicQuant" and not zero and not defaults:
             actual.inv_smooth_scale.copy_((torch.rand(shape[-1], device=device) + 0.1).reciprocal())
         reference.load_state_dict(actual.state_dict())
     return actual, reference, inputs
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            name,
-            marks=pytest.mark.api(
-                "modules." + name,
-                ops=[{"StaticQuant": "static_quant", "DynamicQuant": "dynamic_quant", "Dequant": "dequant"}[name]],
-            ),
-        )
-        for name in ["StaticQuant", "DynamicQuant", "Dequant"]
-    ],
-)
-@pytest.mark.accuracy
-def test_quant(accuracy_backend, name):
-    impl, _, device = accuracy_backend
-    kwargs = {} if name == "Dequant" else dict(input_size=128, device=device)
-    actual = getattr(modules, name)(**kwargs, implementation=impl)
-    reference = getattr(modules, name)(**kwargs, implementation="torch")
-    reference.load_state_dict(actual.state_dict())
-    inputs = (torch.randn(3, 128, device=device, dtype=torch.bfloat16),)
-    if name == "Dequant":
-        inputs = (torch.randint(-127, 127, (3, 128), dtype=torch.int8, device=device), torch.rand(128, device=device))
-    a, e = actual(*inputs), reference(*inputs)
-    if name == "Dequant":
-        assert_close(a, e, rtol=0, atol=0)
-    else:
-        assert_close(a[0], e[0], rtol=0, atol=1)
-        assert_close(a[1], e[1], rtol=2e-3, atol=2e-3)
 
 
 def _quant_cases(name, *, grouped=False, zeros=False):
     # CI keeps each test function on one card; separate operators and layouts.
     cases = []
     for case in QUANT_CASES:
-        operator, _, scale_shape, _, zero = case.values[0]
+        operator, _, scale_shape, _, zero, _ = case.values[0]
         if operator == name and (len(scale_shape or ()) > 1) == grouped and zero == zeros:
             cases.append(case)
     return cases
@@ -143,40 +119,40 @@ def _check_quant_case(accuracy_backend, case):
 @pytest.mark.api("modules.StaticQuant", ops=["static_quant"])
 @pytest.mark.parametrize("case", _quant_cases("StaticQuant"))
 @pytest.mark.accuracy
-def test_static_quant_shapes(accuracy_backend, case):
-    _check_quant_case(accuracy_backend, case)
-
-
-@pytest.mark.api("modules.StaticQuant", ops=["static_quant"])
-@pytest.mark.parametrize("case", _quant_cases("StaticQuant", grouped=True))
-@pytest.mark.accuracy
-def test_static_quant_grouped(accuracy_backend, case):
+def test_static_quant_accuracy(accuracy_backend, case):
     _check_quant_case(accuracy_backend, case)
 
 
 @pytest.mark.api("modules.Dequant", ops=["dequant"])
 @pytest.mark.parametrize("case", _quant_cases("Dequant"))
 @pytest.mark.accuracy
-def test_dequant_shapes(accuracy_backend, case):
-    _check_quant_case(accuracy_backend, case)
-
-
-@pytest.mark.api("modules.Dequant", ops=["dequant"])
-@pytest.mark.parametrize("case", _quant_cases("Dequant", grouped=True))
-@pytest.mark.accuracy
-def test_dequant_grouped(accuracy_backend, case):
+def test_dequant_accuracy(accuracy_backend, case):
     _check_quant_case(accuracy_backend, case)
 
 
 @pytest.mark.api("modules.DynamicQuant", ops=["dynamic_quant"])
 @pytest.mark.parametrize("case", _quant_cases("DynamicQuant"))
 @pytest.mark.accuracy
-def test_dynamic_quant_shapes(accuracy_backend, case):
+def test_dynamic_quant_accuracy(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.StaticQuant", ops=["static_quant"])
+@pytest.mark.parametrize("case", _quant_cases("StaticQuant", grouped=True))
+@pytest.mark.accuracy
+def test_static_quant_grouped_accuracy(accuracy_backend, case):
+    _check_quant_case(accuracy_backend, case)
+
+
+@pytest.mark.api("modules.Dequant", ops=["dequant"])
+@pytest.mark.parametrize("case", _quant_cases("Dequant", grouped=True))
+@pytest.mark.accuracy
+def test_dequant_grouped_accuracy(accuracy_backend, case):
     _check_quant_case(accuracy_backend, case)
 
 
 @pytest.mark.api("modules.DynamicQuant", ops=["dynamic_quant"])
 @pytest.mark.parametrize("case", _quant_cases("DynamicQuant", zeros=True))
 @pytest.mark.accuracy
-def test_dynamic_quant_zeros(accuracy_backend, case):
+def test_dynamic_quant_zeros_accuracy(accuracy_backend, case):
     _check_quant_case(accuracy_backend, case)

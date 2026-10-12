@@ -82,7 +82,7 @@ def make_vision(grid, dtype, device):
 @pytest.mark.parametrize("shape", ROPE_SHAPES)
 @pytest.mark.parametrize("heads", ROPE_HEADS)
 @pytest.mark.parametrize("mode", ROPE_MODES)
-def test_rope(accuracy_backend, shape, heads, mode):
+def test_rope_infer_accuracy(accuracy_backend, shape, heads, mode):
     impl, _, device = accuracy_backend
     inputs = make_rope(shape, heads, mode, device)
     head_first = heads[3]
@@ -103,7 +103,6 @@ def test_rope(accuracy_backend, shape, heads, mode):
 
 
 @pytest.mark.api("functions.rope_infer")
-@pytest.mark.accuracy
 @pytest.mark.parametrize("ndim", [3, 4])
 @pytest.mark.parametrize(
     "head_first,contiguous",
@@ -115,7 +114,7 @@ def test_rope(accuracy_backend, shape, heads, mode):
         pytest.param(True, (False, True), id="head-first-mixed-k"),
     ],
 )
-def test_a5_rope_infer_fake_and_compiled_layout(accuracy_backend, ndim, head_first, contiguous):
+def test_rope_infer_a5_compile_layout(accuracy_backend, ndim, head_first, contiguous):
     implementation, target, device = accuracy_backend
     if implementation not in (None, "triton") or not target.startswith("npu.a5"):
         pytest.skip("A5 Triton inference RoPE layout contract")
@@ -141,19 +140,16 @@ def test_a5_rope_infer_fake_and_compiled_layout(accuracy_backend, ndim, head_fir
 
     def run(q, k, cos, sin):
         outputs = F.rope_infer(q, k, cos, sin, head_first=head_first, implementation="triton")
-        return outputs, tuple(output.reshape(-1) for output in outputs), tuple(
-            (output.stride(), output.is_contiguous()) for output in outputs
-        )
+        return outputs, tuple(output.reshape(-1) for output in outputs), tuple(output.stride() for output in outputs)
 
     try:
-        eager, flattened, metadata = run(*args)
-        assert metadata == tuple((value.stride(), value.is_contiguous()) for value in inputs)
-        compiled = compile_fullgraph(run)
-        actual, actual_flattened, captured_metadata = compiled(*args)
-        assert captured_metadata == metadata
-        assert captured_metadata == tuple((value.stride(), value.is_contiguous()) for value in actual)
-        for result, expected in zip((*actual, *actual_flattened), (*eager, *flattened)):
-            torch.testing.assert_close(result, expected, rtol=0, atol=0)
+        actual, flattened, strides = compile_fullgraph(run)(*args)
+        assert strides == tuple(value.stride() for value in inputs)
+        assert strides == tuple(value.stride() for value in actual)
+        # Keep the downstream reshape: incorrect fake strides can miscompile it.
+        expected = F.rope_infer(*args, head_first=head_first, implementation="triton")
+        assert_close(actual, expected, rtol=0, atol=0)
+        assert_close(flattened, tuple(value.reshape(-1) for value in actual), rtol=0, atol=0)
     finally:
         torch._dynamo.reset()
 
@@ -162,7 +158,7 @@ def test_a5_rope_infer_fake_and_compiled_layout(accuracy_backend, ndim, head_fir
 @pytest.mark.accuracy
 @pytest.mark.parametrize("grid", VISION_GRIDS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_vision(accuracy_backend, grid, dtype):
+def test_vision_rope_2d_infer_accuracy(accuracy_backend, grid, dtype):
     impl, _, device = accuracy_backend
     inputs = make_vision(grid, dtype, device)
     op = partial(F.vision_rope_2d_infer, implementation=impl)

@@ -43,7 +43,7 @@ def check_sampling(name, actual_fn, reference_fn, logits):
         actual_probs, actual_ids = actual_fn(logits.clone())
         expected_probs, expected_ids = reference_fn(logits.clone())
         assert_close(actual_probs.float(), expected_probs.float(), torch.float32, rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(actual_ids.sort(-1).values, expected_ids.sort(-1).values, rtol=0, atol=0)
+        assert_close(actual_ids.sort(-1).values, expected_ids.sort(-1).values, rtol=0, atol=0)
         return
     # Different sampling algorithms need not draw the same token under one seed.
     # Retain master's 200-draw nucleus statistics and apply the same check to top-k.
@@ -100,7 +100,7 @@ def _sampler(name, options, implementation):
     ],
 )
 @pytest.mark.accuracy
-def test_sampling(accuracy_backend, name, shape, options):
+def test_sampling_accuracy(accuracy_backend, name, shape, options):
     implementation, _, device = accuracy_backend
     check_sampling(
         name,
@@ -119,7 +119,7 @@ def test_sampling(accuracy_backend, name, shape, options):
 )
 @pytest.mark.parametrize("case", REJECTION_CASES)
 @pytest.mark.accuracy
-def test_rejection(accuracy_backend, name, case):
+def test_rejection_sampling_accuracy(accuracy_backend, name, case):
     implementation, _, device = accuracy_backend
     inputs = make_rejection_case(name, case, device)
     actual = accepted_prefix(_sampler(name, {}, implementation)(*inputs, random_seed=42))
@@ -131,7 +131,7 @@ def test_rejection(accuracy_backend, name, case):
 @pytest.mark.api("modules.ApplyPenaltiesTemperature", ops=["apply_penalties_temperature"])
 @pytest.mark.parametrize("shape", PENALTY_SHAPES)
 @pytest.mark.accuracy
-def test_penalties(accuracy_backend, shape):
+def test_apply_penalties_temperature_accuracy(accuracy_backend, shape):
     implementation, _, device = accuracy_backend
     logits, options = make_penalty_case(shape, device)
     actual = modules.ApplyPenaltiesTemperature(implementation=implementation)(logits.clone(), *options)

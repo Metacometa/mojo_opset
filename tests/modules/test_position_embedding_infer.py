@@ -79,7 +79,7 @@ def make_vision(grid, dtype, device):
 @pytest.mark.parametrize("shape", ROPE_SHAPES)
 @pytest.mark.parametrize("heads", ROPE_HEADS)
 @pytest.mark.parametrize("mode", ROPE_MODES)
-def test_rope(accuracy_backend, shape, heads, mode):
+def test_rope_infer_accuracy(accuracy_backend, shape, heads, mode):
     impl, _, device = accuracy_backend
     inputs = make_rope(shape, heads, mode, device)
     head_first = heads[3]
@@ -103,7 +103,7 @@ def test_rope(accuracy_backend, shape, heads, mode):
 @pytest.mark.accuracy
 @pytest.mark.parametrize("grid", VISION_GRIDS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_vision(accuracy_backend, grid, dtype):
+def test_vision_rope_2d_infer_accuracy(accuracy_backend, grid, dtype):
     impl, _, device = accuracy_backend
     inputs = make_vision(grid, dtype, device)
     op = M.VisionRoPE2DInfer(implementation=impl)

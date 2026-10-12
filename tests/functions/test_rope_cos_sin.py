@@ -49,7 +49,7 @@ def _rotary(dim, device, implementation, cached=True):
 @pytest.mark.api("functions.rope_cos_sin")
 @pytest.mark.parametrize("case", ROTARY_CASES)
 @pytest.mark.accuracy
-def test_rotary(accuracy_backend, case):
+def test_rope_cos_sin_accuracy(accuracy_backend, case):
     implementation, _, device = accuracy_backend
     x, options = make_rotary_case(case, device)
     actual = _rotary(case[1], device, implementation)(x, **options)
@@ -62,12 +62,10 @@ def test_rotary(accuracy_backend, case):
 @pytest.mark.api("functions.vision_rope_cos_sin_2d")
 @pytest.mark.parametrize("grid", VISION_GRIDS)
 @pytest.mark.accuracy
-def test_vision(accuracy_backend, grid):
+def test_vision_rope_cos_sin_2d_accuracy(accuracy_backend, grid):
     implementation, _, device = accuracy_backend
     grid_hw = torch.tensor(grid, device=device, dtype=torch.int32)
-    table = modules.VisionRoPECosSin2D(
-        rope_dim=64, adapooling_factor=2, device=device, implementation=implementation
-    )
+    table = modules.VisionRoPECosSin2D(rope_dim=64, adapooling_factor=2, device=device, implementation=implementation)
     actual = functions.vision_rope_cos_sin_2d(table.inv_freq, grid_hw, 64, 2, implementation=implementation)
     expected = functions.vision_rope_cos_sin_2d(table.inv_freq, grid_hw, 64, 2, implementation="torch")
     assert_close(actual, expected, rtol=1e-5, atol=1e-5)

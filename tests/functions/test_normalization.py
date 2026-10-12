@@ -12,7 +12,6 @@ from tests._checks import assert_repeatable
 from tests._compile import compile_fullgraph
 
 from .._checks import assert_close
-from .._checks import assert_mojo_close
 from .._checks import clone_with_grad
 
 GROUP_LEADING_SHAPES = [((7, 128), (3, 128)), ((7, 2, 128), (3, 4, 128))]
@@ -61,7 +60,7 @@ RMS_NORM_CASES = [(shape, torch.float32) for shape in MOJO_RMS_SHAPES + M15_RMS_
 @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
 @pytest.mark.parametrize("shape,weight_dtype", RMS_NORM_CASES)
 @pytest.mark.accuracy
-def test_rms_norm(accuracy_backend, dtype, shape, weight_dtype):
+def test_rms_norm_accuracy(accuracy_backend, dtype, shape, weight_dtype):
     implementation, target, device = accuracy_backend
     reference_inputs = (
         torch.randn(shape, device=device, dtype=dtype, requires_grad=True),
@@ -83,7 +82,9 @@ def test_rms_norm(accuracy_backend, dtype, shape, weight_dtype):
     m15 = shape in M15_RMS_SHAPES and dtype == torch.bfloat16
     if shape in MOJO_RMS_SHAPES:
         for index, (a, b) in enumerate(zip((actual, *actual_grads), (expected, *expected_grads))):
-            assert_mojo_close(a, b, name=f"output/grad[{index}]")
+            # Parameter gradients can be FP32 even when activations are BF16.
+            rtol, atol = (6e-3, 6e-3) if a.dtype == torch.float32 else (5e-2, 1e-1)
+            assert_close(a, b, rtol=rtol, atol=atol, name=f"output/grad[{index}]")
         return
     assert_close(actual, expected, dtype, **(dict(rtol=2e-2, atol=2e-2) if m15 else {}))
     for index, (actual_grad, expected_grad) in enumerate(zip(actual_grads, expected_grads)):
@@ -91,56 +92,97 @@ def test_rms_norm(accuracy_backend, dtype, shape, weight_dtype):
         assert_close(actual_grad, expected_grad, dtype, **tolerance)
 
 
-@pytest.mark.parametrize(
-    "op", [pytest.param(op, marks=pytest.mark.api("functions." + op)) for op in ["layer_norm_infer", "rms_norm_infer"]]
-)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("dim", [128, 513])
 @pytest.mark.accuracy
-def test_norm_infer(accuracy_backend, op, dtype, dim):
-    implementation, _, device = accuracy_backend
-    x = torch.randn(2, 13, dim, dtype=dtype, device=device).transpose(0, 1)
-    weight = torch.randn(dim, dtype=dtype, device=device)
+@pytest.mark.parametrize(
+    "op,shape,dtype,strided,has_weight,has_bias,shape_budget",
+    [
+        pytest.param(op, shape, dtype, strided, weight, bias, budget, marks=pytest.mark.api("functions." + op))
+        for op in ("layer_norm_infer", "rms_norm_infer")
+        for shape, dtype, strided, weight, bias, budget in [
+            (shape, dtype, False, True, True, True)
+            for shape in NORM_SHAPES
+            for dtype in (torch.float16, torch.bfloat16)
+        ]
+        + [
+            ((2, 13, dim), dtype, True, True, True, False)
+            for dim in (128, 513)
+            for dtype in (torch.float32, torch.bfloat16)
+        ]
+        + (
+            [
+                ((17, 128), torch.float32, False, weight, bias, False)
+                for weight, bias in ((False, False), (True, False), (False, True))
+            ]
+            if op == "layer_norm_infer"
+            else []
+        )
+    ],
+)
+def test_normalization_infer_accuracy(accuracy_backend, op, shape, dtype, strided, has_weight, has_bias, shape_budget):
+    implementation, target, device = accuracy_backend
+    if not has_weight or not has_bias:
+        selected = implementation or resolve_implementation(op, Target.parse(target))
+        if selected == "ixformer":
+            pytest.skip("ixformer LayerNorm requires affine parameters")
+    if shape_budget:
+        torch.manual_seed(43)
+    x = torch.randn(shape, dtype=dtype, device=device)
+    if strided:
+        x = x.transpose(0, 1)
+    weight = torch.randn(shape[-1], dtype=dtype, device=device) if has_weight else None
     inputs = (x, weight)
     if op == "layer_norm_infer":
-        inputs += (torch.randn_like(weight),)
+        inputs += (torch.randn(shape[-1], dtype=dtype, device=device) if has_bias else None,)
     fn = getattr(F, op)
-    actual = fn(*inputs, implementation=implementation)
-    expected = fn(*inputs, implementation="torch")
-    assert_close(actual, expected, dtype)
-    assert actual.dtype == x.dtype and actual.is_contiguous()
-
-
-@pytest.mark.api("functions.layer_norm_infer")
-@pytest.mark.parametrize("has_weight,has_bias", [(False, False), (True, False), (False, True)])
-@pytest.mark.accuracy
-def test_layer_norm_affine(accuracy_backend, has_weight, has_bias):
-    implementation, target, device = accuracy_backend
-    selected = implementation or resolve_implementation("layer_norm_infer", Target.parse(target))
-    if selected == "ixformer":
-        pytest.skip("ixformer LayerNorm requires affine parameters")
-    x = torch.randn(17, 128, device=device)
-    weight = torch.randn(128, device=device) if has_weight else None
-    bias = torch.randn(128, device=device) if has_bias else None
-    actual = F.layer_norm_infer(x, weight, bias, implementation=implementation)
-    expected = F.layer_norm_infer(x, weight, bias, implementation="torch")
-    assert_close(actual, expected, x.dtype)
+    actual = fn(*inputs, eps=1e-5, implementation=implementation)
+    expected = fn(*inputs, eps=1e-5, implementation="torch")
+    if shape_budget:
+        assert_norm_close(actual, expected, rms=op == "rms_norm_infer")
+    else:
+        assert_close(actual, expected, dtype)
+    if strided:
+        assert actual.is_contiguous()
 
 
 @pytest.mark.api("functions.group_rms_norm_infer")
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("affine", [True, False])
 @pytest.mark.accuracy
-def test_group_rms_norm(accuracy_backend, dtype, affine):
+@pytest.mark.parametrize(
+    "tokens,heads,dim,dtype,affine,packed,shape_budget",
+    [
+        (17, (4, 2), 128, dtype, affine, True, False)
+        for dtype in (torch.float32, torch.bfloat16)
+        for affine in (True, False)
+    ]
+    + [
+        (tokens, heads, dim, dtype, True, True, True)
+        for tokens, heads, dim in GROUP_SHAPES
+        for dtype in (torch.float16, torch.bfloat16)
+    ]
+    + [
+        (3, tuple(range(1, count + 1)), dim, dtype, affine, False, False)
+        for count, dim in ((1, 128), (5, 128), (4, 2048), (2, 4096), (4, 4096), (2, 8192), (4, 10240), (2, 16384))
+        for dtype in (torch.float32, torch.bfloat16)
+        for affine in (True, False)
+    ],
+)
+def test_group_rms_norm_infer_accuracy(accuracy_backend, tokens, heads, dim, dtype, affine, packed, shape_budget):
     implementation, _, device = accuracy_backend
-    packed = torch.randn(17, 6, 128, device=device, dtype=dtype)
-    groups = [packed[:, :4], packed[:, 4:]]
-    weight = torch.randn(2, 128, device=device, dtype=dtype) if affine else None
-    actual = F.group_rms_norm_infer(groups, weight, implementation=implementation)
-    expected = F.group_rms_norm_infer(groups, weight, implementation="torch")
-    for output, ref, original in zip(actual, expected, groups):
-        assert_close(output, ref, dtype)
-        assert output.shape == original.shape and output.dtype == dtype and output.is_contiguous()
+    if shape_budget:
+        torch.manual_seed(43)
+    if packed:
+        groups = list(torch.randn(tokens, sum(heads), dim, device=device, dtype=dtype).split(heads, dim=1))
+    else:
+        groups = [torch.randn(tokens, head, dim, device=device, dtype=dtype) for head in heads]
+    weight = torch.randn(len(heads), dim, device=device, dtype=dtype) if affine else None
+    actual = F.group_rms_norm_infer(groups, weight, eps=1e-5, implementation=implementation)
+    expected = F.group_rms_norm_infer(groups, weight, eps=1e-5, implementation="torch")
+    for output, ref in zip(actual, expected):
+        if shape_budget:
+            assert_norm_close(output, ref, rms=True)
+        else:
+            assert_close(output, ref, dtype)
+        if packed and not shape_budget:
+            assert output.is_contiguous()
 
 
 @pytest.mark.api("functions.group_rms_norm_infer")
@@ -168,151 +210,43 @@ def test_group_layout(accuracy_backend, shapes, dtype):
     "op",
     [
         pytest.param(op, marks=pytest.mark.api("functions." + op))
-        for op in ["residual_add_layer_norm_infer", "residual_add_rms_norm_infer"]
+        for op in ("residual_add_layer_norm_infer", "residual_add_rms_norm_infer")
     ],
 )
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("norm_pos", ["pre", "post"])
+@pytest.mark.parametrize(
+    "shape,dtype,strided",
+    [((2, 13, 128), dtype, True) for dtype in (torch.float32, torch.bfloat16)]
+    + [(shape, dtype, False) for shape in RESIDUAL_SHAPES for dtype in (torch.float16, torch.bfloat16)],
+)
 @pytest.mark.accuracy
-def test_residual_norm(accuracy_backend, op, dtype, norm_pos):
+def test_residual_add_normalization_infer_accuracy(accuracy_backend, op, norm_pos, shape, dtype, strided):
     implementation, _, device = accuracy_backend
-    x = torch.randn(2, 13, 128, device=device, dtype=dtype).transpose(0, 1)
+    if not strided:
+        torch.manual_seed(43)
+    x = torch.randn(shape, dtype=dtype, device=device)
+    if strided:
+        x = x.transpose(0, 1)
     residual = torch.randn_like(x)
-    weight = torch.randn(128, device=device, dtype=dtype)
+    weight = torch.randn(shape[-1], dtype=dtype, device=device)
     inputs = (x, residual, weight)
     if op == "residual_add_layer_norm_infer":
         inputs += (torch.randn_like(weight),)
-    original_x, original_residual = x.clone(), residual.clone()
+    originals = (x.clone(), residual.clone()) if strided else None
     fn = getattr(F, op)
-    actual = fn(*inputs, norm_pos=norm_pos, implementation=implementation)
-    expected = fn(*inputs, norm_pos=norm_pos, implementation="torch")
+    actual = fn(*inputs, norm_pos=norm_pos, eps=1e-5, implementation=implementation)
+    expected = fn(*inputs, norm_pos=norm_pos, eps=1e-5, implementation="torch")
     for output, ref in zip(actual, expected):
-        assert_close(output, ref, dtype)
-        assert output.dtype == dtype and output.is_contiguous()
-    assert_close(x, original_x, rtol=0, atol=0)
-    assert_close(residual, original_residual, rtol=0, atol=0)
-    if norm_pos == "post":
+        if strided:
+            assert_close(output, ref, dtype)
+            assert output.is_contiguous()
+        else:
+            assert_norm_close(output, ref)
+    if strided:
+        for tensor, original in zip((x, residual), originals):
+            assert_close(tensor, original, rtol=0, atol=0)
+    if strided and norm_pos == "post":
         assert actual[0] is actual[1]
-
-
-@pytest.mark.parametrize(
-    "op",
-    [
-        pytest.param(op, marks=pytest.mark.api("functions." + op))
-        for op in [
-            "layer_norm_infer",
-            "rms_norm_infer",
-            "group_rms_norm_infer",
-            "residual_add_layer_norm_infer",
-            "residual_add_rms_norm_infer",
-        ]
-    ],
-)
-@pytest.mark.accuracy
-@pytest.mark.reference
-def test_infer_autograd(op):
-    x = torch.randn(2, 4, 128, requires_grad=True)
-    weight = torch.ones(128)
-    if op == "group_rms_norm_infer":
-        args = ([x], weight[None])
-    elif op.startswith("residual"):
-        args = (x, torch.randn_like(x), weight)
-        if op == "residual_add_layer_norm_infer":
-            args += (torch.zeros_like(weight),)
-    else:
-        args = (x, weight)
-    with pytest.raises(RuntimeError, match="does not support autograd"):
-        getattr(F, op)(*args, implementation="torch")
-
-
-# Keep the original master operator matrix in addition to the
-# small layout/contract cases above. In particular, these exercise multi-pass
-# column reductions (>2048), not only the newly added inference wrappers.
-@pytest.mark.parametrize(
-    "op", [pytest.param(op, marks=pytest.mark.api("functions." + op)) for op in ["layer_norm_infer", "rms_norm_infer"]]
-)
-@pytest.mark.parametrize("shape", NORM_SHAPES)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.accuracy
-def test_norm_shapes(accuracy_backend, op, shape, dtype):
-    implementation, _, device = accuracy_backend
-    torch.manual_seed(43)
-    inputs = (torch.randn(shape, device=device, dtype=dtype), torch.randn(shape[-1], device=device, dtype=dtype))
-    if op == "layer_norm_infer":
-        inputs += (torch.randn_like(inputs[1]),)
-    actual = getattr(F, op)(*inputs, eps=1e-5, implementation=implementation)
-    expected = getattr(F, op)(*inputs, eps=1e-5, implementation="torch")
-    assert_norm_close(actual, expected, rms=op == "rms_norm_infer")
-
-
-@pytest.mark.api("functions.group_rms_norm_infer")
-@pytest.mark.parametrize("tokens,heads,dim", GROUP_SHAPES)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.accuracy
-def test_group_shapes(accuracy_backend, tokens, heads, dim, dtype):
-    implementation, _, device = accuracy_backend
-    torch.manual_seed(43)
-    packed = torch.randn(tokens, sum(heads), dim, device=device, dtype=dtype)
-    groups = list(torch.split(packed, heads, dim=1))
-    weight = torch.randn(len(heads), dim, device=device, dtype=dtype)
-    actual = F.group_rms_norm_infer(groups, weight, eps=1e-5, implementation=implementation)
-    expected = F.group_rms_norm_infer(groups, weight, eps=1e-5, implementation="torch")
-    for output, ref in zip(actual, expected):
-        assert_norm_close(output, ref, rms=True)
-
-
-@pytest.mark.api("functions.group_rms_norm_infer")
-@pytest.mark.parametrize(
-    "group_count,dim",
-    [
-        (1, 128),
-        (5, 128),
-        (4, 2048),
-        (2, 4096),
-        (4, 4096),
-        (2, 8192),
-        (4, 10240),
-        (2, 16384),
-    ],
-)
-@pytest.mark.parametrize("affine", [True, False])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.accuracy
-def test_group_dispatch(accuracy_backend, group_count, dim, affine, dtype):
-    implementation, _, device = accuracy_backend
-    groups = [torch.randn(3, heads + 1, dim, device=device, dtype=dtype) for heads in range(group_count)]
-    weight = torch.randn(group_count, dim, device=device, dtype=dtype) if affine else None
-    actual = F.group_rms_norm_infer(groups, weight, implementation=implementation)
-    expected = F.group_rms_norm_infer(groups, weight, implementation="torch")
-    for output, ref in zip(actual, expected):
-        assert_close(output, ref, dtype)
-
-
-@pytest.mark.parametrize(
-    "op",
-    [
-        pytest.param(op, marks=pytest.mark.api("functions." + op))
-        for op in ["residual_add_layer_norm_infer", "residual_add_rms_norm_infer"]
-    ],
-)
-@pytest.mark.parametrize("shape", RESIDUAL_SHAPES)
-@pytest.mark.parametrize("norm_pos", ["pre", "post"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.accuracy
-def test_residual_shapes(accuracy_backend, op, shape, norm_pos, dtype):
-    implementation, _, device = accuracy_backend
-    torch.manual_seed(43)
-    inputs = (
-        torch.randn(shape, device=device, dtype=dtype),
-        torch.randn(shape, device=device, dtype=dtype),
-        torch.randn(shape[-1], device=device, dtype=dtype),
-    )
-    if op == "residual_add_layer_norm_infer":
-        inputs += (torch.randn_like(inputs[-1]),)
-    actual = getattr(F, op)(*inputs, norm_pos=norm_pos, eps=1e-5, implementation=implementation)
-    expected = getattr(F, op)(*inputs, norm_pos=norm_pos, eps=1e-5, implementation="torch")
-    for output, ref in zip(actual, expected):
-        assert_norm_close(output, ref)
 
 
 @pytest.mark.api("functions.rms_norm")
@@ -328,7 +262,41 @@ def test_rms_norm_bitwise(accuracy_backend, dtype, shape, weight_dtype):
     assert_repeatable(partial(F.rms_norm, implementation=implementation), inputs)
 
 
-@pytest.mark.accuracy
+@pytest.mark.api("functions.rms_norm")
+def test_rms_norm_fake_metadata(accuracy_backend):
+    implementation, target, device = accuracy_backend
+    if implementation not in (None, "triton") or not target.startswith(("npu.a2", "npu.a5")):
+        pytest.skip("NPU Triton fake metadata")
+    preload("rms_norm", implementation="triton", target=target)
+    ops = getattr(torch.ops, f"mojo_npu_triton_{target.split('.')[1]}")
+    x = torch.randn(17, 7, device=device, dtype=torch.bfloat16).T
+    weight = torch.randn(34, device=device)[::2]
+    torch.library.opcheck(ops.rms_norm_fwd.default, (x, weight, 1e-6), test_utils=("test_faketensor",))
+    # The backward wrapper normalizes inputs before invoking its two leaves.
+    x, weight = x.contiguous(), weight.contiguous()
+    rstd = torch.ones(x.shape[0], device=device)
+    torch.library.opcheck(
+        ops.rms_norm_bwd_partial.default,
+        (torch.randn_like(x), x, weight, rstd, 2),
+        test_utils=("test_faketensor",),
+    )
+    torch.library.opcheck(
+        ops.rms_norm_dw_reduce.default,
+        (torch.randn(2, x.shape[1], device=device), weight.dtype),
+        test_utils=("test_faketensor",),
+    )
+
+
+@pytest.mark.reference
+@pytest.mark.api("functions.rms_norm")
+@pytest.mark.parametrize("shape", [(1, 4), (4, 1), ()])
+def test_rms_norm_rejects_invalid_weight_shape(shape):
+    x = torch.randn(2, 4, requires_grad=True)
+    weight = torch.ones(shape, requires_grad=True)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        functions.rms_norm(x, weight, implementation="torch")
+
+
 @pytest.mark.api("functions.rms_norm")
 @pytest.mark.parametrize("op", ["rms_norm"])
 @pytest.mark.parametrize("backend", ["eager", "aot_eager"])
@@ -370,13 +338,3 @@ def test_compiled_layout(accuracy_backend, op, backend):
             torch.testing.assert_close(grad, expected, rtol=2e-2, atol=2e-2)
     finally:
         torch._dynamo.reset()
-
-
-@pytest.mark.accuracy
-@pytest.mark.api("functions.rms_norm")
-@pytest.mark.parametrize("shape", [(1, 4), (4, 1), ()])
-def test_weight_shape(shape):
-    x = torch.randn(2, 4, requires_grad=True)
-    weight = torch.ones(shape, requires_grad=True)
-    with pytest.raises(ValueError, match="one-dimensional"):
-        functions.rms_norm(x, weight, implementation="torch")

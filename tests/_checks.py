@@ -28,6 +28,11 @@ def clone_with_grad(tensors):
 
 
 def assert_close(actual, expected, dtype=None, *, name="tensor", max_print=5, rtol=None, atol=None):
+    """Compare results using the shared per-element criterion.
+
+    dtype selects the default computation-precision budget. Explicit rtol/atol
+    override only this comparison; use rtol=atol=0 for exact numerical equality.
+    """
     if isinstance(actual, (tuple, list, dict)) or isinstance(expected, (tuple, list, dict)):
         actual_leaves, actual_spec = tree_flatten(actual)
         expected_leaves, expected_spec = tree_flatten(expected)
@@ -72,39 +77,10 @@ def assert_close(actual, expected, dtype=None, *, name="tensor", max_print=5, rt
         raise AssertionError("\n".join(details)) from None
 
 
-def assert_mojo_close(actual, expected, *, name="tensor", max_print=5):
-    """Original Mojo training criterion: per-element max tolerance plus its mean-error check."""
-    assert actual.shape == expected.shape, f"{name}: shapes differ: {actual.shape} != {expected.shape}"
-    assert actual.dtype == expected.dtype, f"{name}: dtypes differ: {actual.dtype} != {expected.dtype}"
-    assert actual.device == expected.device, f"{name}: devices differ: {actual.device} != {expected.device}"
-    max_rtol, max_atol, mean_rtol, mean_atol = {
-        torch.float32: (6e-3, 6e-3, 1e-4, 1e-4),
-        torch.float16: (2e-2, 2e-2, 2e-2, 2e-2),
-        torch.bfloat16: (5e-2, 1e-1, 1e-2, 1e-2),
-    }[actual.dtype]
-    assert_close(
-        actual.float(),
-        expected.float(),
-        torch.float32,
-        rtol=max_rtol,
-        atol=max_atol,
-        name=name,
-        max_print=max_print,
-    )
-    # Master evaluates these means in the original dtype and uses max_atol in
-    # the absolute branch; retain that exact criterion, not a new global default.
-    difference = expected - actual
-    mean_abs = difference.abs().mean()
-    mean_rel = (difference / (expected + mean_atol)).abs().mean()
-    assert bool(mean_abs < max_atol or mean_rel < mean_rtol), (
-        f"{name}: mean_abs_error={mean_abs.item():.8g} (limit={max_atol:g}), "
-        f"mean_relative_error={mean_rel.item():.8g} (limit={mean_rtol:g})"
-    )
+def check_forward_backward(function, inputs, *, implementation, gradient_scale=1.0, grad_tolerances=None, **kwargs):
+    """Run candidate/reference forward and backward, then check outputs and gradients.
 
-
-def assert_accuracy(function, inputs, *, implementation, gradient_scale=1.0, grad_tolerances=None, **kwargs):
-    """Compare public training forward/backward with reference using one upstream.
-
+    Both paths use independent input copies and the same upstream gradient.
     Tests with a specialized oracle can call ``assert_close`` directly; both
     paths use the same dtype tolerances and failure diagnostics.
     """

@@ -51,7 +51,7 @@ def swiglu_case(case, device, impl, *, activate_left=False, with_bias=False):
 @pytest.mark.api("modules.DequantSwiGLUQuant", ops=["dequant_swiglu_quant"])
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", SWIGLU_CASES)
-def test_swiglu(accuracy_backend, case):
+def test_dequant_swiglu_quant_accuracy(accuracy_backend, case):
     impl, _, device = accuracy_backend
     call, reference, inputs = swiglu_case(case, device, impl)
     check_grouped(call(*inputs), reference(*inputs), swiglu=True)

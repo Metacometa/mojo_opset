@@ -99,7 +99,7 @@ def _build_store_paged_kv_case(batch_size, kv_heads, head_dim, block_size, conte
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", KV_CASES + [(6, 2, 128, 128, [0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 0, 0])])
 @pytest.mark.parametrize("precompute", [False, True])
-def test_store(accuracy_backend, case, precompute):
+def test_store_paged_kv_cache_accuracy(accuracy_backend, case, precompute):
     impl, _, device = accuracy_backend
     if impl == "torch_npu":
         pytest.skip("Inherited master exclusion: torch_npu paged KV scatter causes CI coredump")

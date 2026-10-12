@@ -257,7 +257,7 @@ def prefill_case(case, layout, device, impl):
     [pytest.param(spec, marks=pytest.mark.api("functions." + spec[0])) for spec in PAGED_CASES],
     ids=[f"{x[0]}-{x[2][-1]}-{x[3]}" for x in PAGED_CASES],
 )
-def test_paged(accuracy_backend, spec):
+def test_paged_attention_accuracy(accuracy_backend, spec):
     impl, _, device = accuracy_backend
     call, ref, inputs, dtype = paged_case(spec, device, impl)
     assert_close(call(*inputs), ref(*inputs), dtype, rtol=2e-2, atol=2e-2)
@@ -276,7 +276,7 @@ def test_paged_bucket(accuracy_backend, layout):
 @pytest.mark.accuracy
 @pytest.mark.parametrize("case", PREFILL_CASES)
 @pytest.mark.parametrize("layout", ["ABAB", "AABB"])
-def test_prefill(accuracy_backend, case, layout):
+def test_prefill_gqa_infer_accuracy(accuracy_backend, case, layout):
     impl, _, device = accuracy_backend
     call, ref, inputs = prefill_case(case, layout, device, impl)
     assert_close(call(*inputs), ref(*inputs), torch.bfloat16, rtol=2e-2, atol=2e-2)
