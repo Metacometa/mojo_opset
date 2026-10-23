@@ -722,20 +722,20 @@ def test_swa_mask_template_tiles(accuracy_backend, block_m, block_n, window, glo
 @pytest.mark.parametrize(
     "op", [pytest.param(op, marks=pytest.mark.api("functions." + op)) for op in ("swa", "flash_attention")]
 )
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.accuracy
-def test_prebound(accuracy_backend, monkeypatch, op, compiled):
-    from mojo_opset.functions import attention
-    from mojo_opset.functions._dispatch import load_impl
+def test_external_context(accuracy_backend, op):
+    """Fused callers own a child context; the outer Function owns saved tensors.
 
-    impl, target, device = accuracy_backend
+    Exercise the eager forward/backward contract used by xpu_speed. Direct
+    fullgraph capture of Python context mutation is not part of this contract;
+    public API compilation is covered by test_compiled_leaves.
+    """
+    from mojo_opset.functions import attention
+
+    impl, _, device = accuracy_backend
     if op == "swa":
         impl = check_swa_case(accuracy_backend)
-    if compiled and impl == "torch":
-        pytest.skip("Torch attention reference uses eager variable-length loops")
-    forward, backward = load_impl(op, impl, target=target, require_backward=True)
     function = attention.SwaFunction if op == "swa" else attention.FlashAttentionFunction
-    inputs = _make_attention_inputs(device, torch.bfloat16, 128, 4, 2)
     cu = torch.tensor([0, 128], device=device, dtype=torch.int32)
     options = (
         (cu, cu, True, 63, 4, 128**-0.5, False, impl != "torch_npu", impl)
@@ -743,38 +743,51 @@ def test_prebound(accuracy_backend, monkeypatch, op, compiled):
         else (None, cu, cu, 128, 128, 0.0, 128**-0.5, True, True, impl)
     )
 
+    class AttentionContext:
+        def __init__(self):
+            self._saved = ()
+
+        def save_for_backward(self, *tensors):
+            self._saved = tensors
+
+        @property
+        def saved_tensors(self):
+            return self._saved
+
     class Fused(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, q, k, v, forward_kernel, backward_kernel, *args):
-            ctx.forward_kernel, ctx.backward_kernel = forward_kernel, backward_kernel
-            return function.forward(ctx, q, k, v, *args)
+        def forward(ctx, q, k, v):
+            inner = AttentionContext()
+            output = function.forward(inner, q, k, v, *options)
+            ctx.save_for_backward(*inner.saved_tensors)
+            inner.save_for_backward()
+            ctx.inner = inner
+            return output
 
         @staticmethod
         def backward(ctx, grad):
-            grads = function.backward(ctx, grad)
-            return *grads[:3], None, None, *grads[3:]
+            inner = ctx.inner
+            inner.save_for_backward(*ctx.saved_tensors)
+            grads = function.backward(inner, grad)
+            inner.save_for_backward()
+            return grads[:3]
 
-    # Bind the ordinary path first, then ensure fused calls cannot redispatch.
-    expected = function.apply(*inputs, *options)
-    upstream = torch.randn_like(expected)
-    expected_grads = torch.autograd.grad(expected, inputs, upstream)
-
-    def unexpected_dispatch(*args, **kwargs):
-        raise AssertionError("a prebound forward/backward pair must not redispatch")
-
-    def run(*xs):
-        return Fused.apply(*xs, forward, backward, *options)
-
-    monkeypatch.setattr(attention, "load_impl", unexpected_dispatch)
-    try:
-        call = compile_fullgraph(run) if compiled else run
-        actual = call(*inputs)
-        actual_grads = torch.autograd.grad(actual, inputs, upstream)
+    # Keep two forwards alive, then run backward in reverse order to catch
+    # accidentally shared child contexts or caches between invocations.
+    pending = []
+    for _ in range(2):
+        inputs = _make_attention_inputs(device, torch.bfloat16, 128, 4, 2)
+        expected = function.apply(*inputs, *options)
+        upstream = torch.randn_like(expected)
+        expected_grads = torch.autograd.grad(expected, inputs, upstream)
+        actual = Fused.apply(*inputs)
         assert_close(actual, expected, torch.bfloat16, rtol=0, atol=0)
+        pending.append((inputs, actual, upstream, expected_grads))
+
+    for inputs, actual, upstream, expected_grads in reversed(pending):
+        actual_grads = torch.autograd.grad(actual, inputs, upstream)
         assert_close(actual_grads, expected_grads, torch.bfloat16, rtol=0, atol=0)
-        assert_repeatable(call, inputs)
-    finally:
-        torch._dynamo.reset()
+    assert_repeatable(Fused.apply, pending[0][0])
 
 
 @pytest.mark.api("functions.flash_attention")
