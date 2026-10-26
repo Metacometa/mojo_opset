@@ -569,14 +569,16 @@ def test_compiled_leaves(accuracy_backend, op, output_f32):
     inputs = tuple(torch.randn(128, h, 128, dtype=torch.bfloat16, device=device, requires_grad=True) for h in (4, 2, 2))
 
     def run(q, k, v):
+        # Torch 2.13 Dynamo rejects duplicate Tensor inputs to Function.apply.
+        # A zero-copy view keeps Q/K offsets equal without duplicating storage.
         if op == "flash_attention":
-            return F.flash_attention(q, k, v, cu, cu, 128, 128, causal=True, implementation=implementation)
+            return F.flash_attention(q, k, v, cu, cu.view_as(cu), 128, 128, causal=True, implementation=implementation)
         return F.swa(
             q,
             k,
             v,
             cu,
-            cu,
+            cu.view_as(cu),
             local_window_size=63,
             global_window_size=4,
             output_f32=output_f32,
@@ -804,7 +806,9 @@ def test_flash_attention_runtime_policy(accuracy_backend, compiled, phase, deter
     cu = torch.tensor([0, 128], device=device, dtype=torch.int32)
 
     def run(q, k, v):
-        return F.flash_attention(q, k, v, cu, cu, 128, 128, causal=True, implementation=implementation)
+        # Torch 2.13 Dynamo rejects duplicate Tensor inputs to Function.apply.
+        # A zero-copy view keeps Q/K offsets equal without duplicating storage.
+        return F.flash_attention(q, k, v, cu, cu.view_as(cu), 128, 128, causal=True, implementation=implementation)
 
     enabled = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
