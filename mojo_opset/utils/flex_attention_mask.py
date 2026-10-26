@@ -256,4 +256,95 @@ def create_block_mask_patched(
     return packed_block_mask
 
 
+def try_create_video_block_mask(q_ranges, k_ranges, total_s, device, BLOCK_SIZE=128, tiles_per_chunk=512):
+    """Pack frame-causal video masks without scanning dense token-pair stripes.
+
+    Accept only contiguous frames and contiguous videos with prefix K ranges.
+    Return None for other layouts so the caller can retain its generic path.
+    SeedViT may attach CPU ranges at their producer to avoid reading NPU
+    scalars here; callers without that hint incur one bulk copy per tensor.
+    This constructs metadata only; attention still uses the selected provider.
+    """
+    total_s = int(total_s)
+    if total_s <= 0 or q_ranges.ndim != 2 or k_ranges.shape != q_ranges.shape or q_ranges.shape[1] != 2:
+        return None
+    if q_ranges.dtype not in (torch.int32, torch.int64) or k_ranges.dtype not in (torch.int32, torch.int64):
+        return None
+
+    def host_ranges(ranges):
+        host = getattr(ranges, "_mojo_host_ranges", None)
+        return ranges.detach().cpu().tolist() if host is None else host
+
+    q_host, k_host = host_ranges(q_ranges), host_ranges(k_ranges)
+    if len(q_host) != q_ranges.shape[0] or len(k_host) != len(q_host):
+        return None
+    lengths, videos = [], []
+    cursor, video_start, video_index = 0, None, -1
+    for (q_start, q_end), (k_start, k_end) in zip(q_host, k_host):
+        if q_start != cursor or q_end < q_start or q_end > total_s or k_end != q_end:
+            return None
+        if k_start != video_start:
+            # A new video must begin at this frame, never revisit an old one.
+            if k_start != q_start:
+                return None
+            video_start, video_index = k_start, video_index + 1
+        lengths.append(q_end - q_start)
+        videos.append(video_index)
+        cursor = q_end
+    if cursor != total_s:
+        return None
+
+    if isinstance(BLOCK_SIZE, int):
+        bs_q, bs_kv = BLOCK_SIZE, BLOCK_SIZE
+    else:
+        bs_q, bs_kv = BLOCK_SIZE
+    if min(bs_q, bs_kv, tiles_per_chunk) <= 0:
+        raise ValueError("Block sizes and tiles_per_chunk must be positive")
+
+    # Repeat on CPU, then transfer once: no per-frame NPU scalar extraction or
+    # per-frame fill kernels. The producer hint is immutable host metadata.
+    repeats = torch.tensor(lengths, dtype=torch.int64, device="cpu")
+    frame_id = torch.repeat_interleave(
+        torch.arange(len(lengths), dtype=torch.int32, device="cpu"), repeats, output_size=total_s
+    ).to(device)
+    video_id = torch.repeat_interleave(
+        torch.tensor(videos, dtype=torch.int32, device="cpu"), repeats, output_size=total_s
+    ).to(device)
+    q_begin = torch.arange((total_s + bs_q - 1) // bs_q, device=device) * bs_q
+    k_begin = torch.arange((total_s + bs_kv - 1) // bs_kv, device=device) * bs_kv
+    q_end, k_end = (q_begin + bs_q - 1).clamp(max=total_s - 1), (k_begin + bs_kv - 1).clamp(max=total_s - 1)
+    qv0, qv1 = video_id[q_begin][:, None], video_id[q_end][:, None]
+    kv0, kv1 = video_id[k_begin][None, :], video_id[k_end][None, :]
+    skip = (qv1 < kv0) | (qv0 > kv1) | (frame_id[q_end][:, None] < frame_id[k_begin][None, :])
+    full = (
+        ~skip
+        & (qv0 == qv1)
+        & (qv1 == kv0)
+        & (kv0 == kv1)
+        & (frame_id[q_begin][:, None] >= frame_id[k_end][None, :])
+        & ((q_begin + bs_q)[:, None] <= total_s)
+        & ((k_begin + bs_kv)[None, :] <= total_s)
+    )
+    partial = ~skip & ~full
+    positions = partial.nonzero(as_tuple=False)
+    # One dynamic nonzero remains; avoid a scalar sum().item() per stripe.
+    q_offset = torch.arange(bs_q, device=device).view(1, bs_q, 1)
+    k_offset = torch.arange(bs_kv, device=device).view(1, 1, bs_kv)
+    tiles = []
+    for start in range(0, positions.shape[0], tiles_per_chunk):
+        pairs = positions[start : start + tiles_per_chunk]
+        qi = pairs[:, 0, None, None] * bs_q + q_offset
+        ki = pairs[:, 1, None, None] * bs_kv + k_offset
+        valid = (qi < total_s) & (ki < total_s)
+        qi, ki = qi.clamp(max=total_s - 1), ki.clamp(max=total_s - 1)
+        tiles.append((video_id[qi] == video_id[ki]) & (frame_id[ki] <= frame_id[qi]) & valid)
+    packed = torch.cat(tiles) if tiles else torch.empty((0, bs_q, bs_kv), dtype=torch.bool, device=device)
+    table = torch.full(partial.shape, -1, dtype=torch.int32, device=device)
+    table[positions[:, 0], positions[:, 1]] = torch.arange(positions.shape[0], dtype=torch.int32, device=device)
+    flags = (partial.to(torch.int8) + 2 * full.to(torch.int8))[None, None]
+    return _assemble_packed_block_mask(
+        flags, packed, table, partial.sum(-1, dtype=torch.int32), total_s, total_s, bs_q, bs_kv
+    )
+
+
 create_flex_block_mask = create_block_mask_patched
