@@ -773,41 +773,32 @@ def flex_attention_kernel(
         partial_mask_offset = tl.load(PARTIAL_MASK_OFFSETS + q_sparse_idx * stride_partial_offset_m)
         q_sparse_base = q_sparse_idx * SPARSE_Q_BLOCK_SIZE
 
-        kv_indices = KV_IDX + sparse_kv_idx_offset
-        kv_num_blocks = tl.load(KV_NUM_BLKS + sparse_kv_num_blks_offset)
-        block_n_end = tl.minimum(kv_num_blocks * SPARSE_KV_MULTIPLE, tl.maximum(tl.cdiv(KV_LEN, BLOCK_N), 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
-        for start_n in range(0, block_n_end):
-            blk_idx_in_list = start_n // SPARSE_KV_MULTIPLE
-            kv_block = tl.load(kv_indices + blk_idx_in_list)
-            kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + (start_n % SPARSE_KV_MULTIPLE) * BLOCK_N
+        partial_kv_indices = KV_IDX + sparse_kv_idx_offset
+        partial_kv_num_blocks = tl.load(KV_NUM_BLKS + sparse_kv_num_blks_offset)
+        partial_block_n_end = tl.minimum(partial_kv_num_blocks * SPARSE_KV_MULTIPLE, tl.maximum(tl.cdiv(KV_LEN, BLOCK_N), 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+        
+        full_block_n_end = 0
+        if HAS_FULL_BLOCKS:
+            full_kv_indices = FULL_KV_IDX + sparse_kv_idx_offset
+            full_kv_num_blocks = tl.load(FULL_KV_NUM_BLKS + sparse_kv_num_blks_offset)
+            full_block_n_end = tl.minimum(full_kv_num_blocks * SPARSE_KV_MULTIPLE, tl.maximum(tl.cdiv(KV_LEN, BLOCK_N), 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+        
+        block_n_end = partial_block_n_end + full_block_n_end
 
-            offs_n_load = kv_start + tl.arange(0, BLOCK_N)
-            if USE_PACKED_PARTIAL_MASK:
-                partial_block_idx = partial_mask_offset + blk_idx_in_list
-                offs_m_in_block = offs_m - q_sparse_base
-                offs_n_in_block = (start_n % SPARSE_KV_MULTIPLE) * BLOCK_N + tl.arange(0, BLOCK_N)
-                mask = load_packed_partial_mask(
-                    PARTIAL_MASK_PACKED,
-                    stride_partial_p,
-                    stride_partial_m,
-                    stride_partial_n,
-                    partial_block_idx,
-                    offs_m_in_block,
-                    offs_n_in_block,
-                    SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
-                    SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
-                )
+        for start_n in range(0, block_n_end):          
+            if start_n < partial_block_n_end:
+                blk_idx_in_list = start_n // SPARSE_KV_MULTIPLE
+                kv_block = tl.load(partial_kv_indices + blk_idx_in_list)
+                block_offset = start_n % SPARSE_KV_MULTIPLE
             else:
-                mask = load_dense_mask(
-                    DENSE_MASK,
-                    stride_mask_m,
-                    stride_mask_n,
-                    offs_m,
-                    offs_n_load,
-                    Q_LEN=Q_LEN,
-                    KV_LEN=KV_LEN,
-                )
-
+                full_start_n = start_n - partial_block_n_end
+                block_offset = full_start_n % SPARSE_KV_MULTIPLE
+                blk_idx_in_list = full_start_n // SPARSE_KV_MULTIPLE
+                kv_block = tl.load(full_kv_indices + blk_idx_in_list)
+                
+            kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + block_offset * BLOCK_N
+            offs_n_load = kv_start + tl.arange(0, BLOCK_N)
+            
             k = tl.load(
                 K_ptr + offs_n_load[:, None] * stride_kn + offs_k[None, :] * stride_kk,
                 mask=(offs_n_load[:, None] < KV_LEN),
@@ -823,54 +814,49 @@ def flex_attention_kernel(
             qk = tl.dot(q, k, input_precision="ieee")
             qk *= SM_SCALE
 
-            qk = tl.where(mask, qk, float("-inf"))
+            if start_n < partial_block_n_end:
+                if USE_PACKED_PARTIAL_MASK:
+                    partial_block_idx = partial_mask_offset + blk_idx_in_list
+                    offs_m_in_block = offs_m - q_sparse_base
+                    offs_n_in_block = (start_n % SPARSE_KV_MULTIPLE) * BLOCK_N + tl.arange(0, BLOCK_N)
+                    mask = load_packed_partial_mask(
+                        PARTIAL_MASK_PACKED,
+                        stride_partial_p,
+                        stride_partial_m,
+                        stride_partial_n,
+                        partial_block_idx,
+                        offs_m_in_block,
+                        offs_n_in_block,
+                        SPARSE_Q_BLOCK_SIZE=SPARSE_Q_BLOCK_SIZE,
+                        SPARSE_KV_BLOCK_SIZE=SPARSE_KV_BLOCK_SIZE,
+                    )
+                else:
+                    mask = load_dense_mask(
+                        DENSE_MASK,
+                        stride_mask_m,
+                        stride_mask_n,
+                        offs_m,
+                        offs_n_load,
+                        Q_LEN=Q_LEN,
+                        KV_LEN=KV_LEN,
+                    )
+                qk = tl.where(mask, qk, float("-inf"))
+                
+                m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+                masked_out_rows = (m_ij == float("-inf"))
+                m_ij_handled = tl.where(masked_out_rows, 0, m_ij)
+            else:
+                m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
+                m_ij_handled = m_ij
 
-            m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
-            masked_out_rows = (m_ij == float("-inf"))
-            m_ij_masked = tl.where(masked_out_rows, 0, m_ij)
-
-            alpha = tl.math.exp(m_i - m_ij_masked)
-            p = tl.math.exp(qk - m_ij_masked[:, None])
+            alpha = tl.math.exp(m_i - m_ij_handled)
+            p = tl.math.exp(qk - m_ij_handled[:, None])
 
             pv = tl.dot(p.to(Q.dtype.element_ty), v, input_precision="ieee")
             l_i = l_i * alpha + tl.sum(p, 1)
             acc = acc * alpha[:, None] + pv
             m_i = m_ij
-
-        if HAS_FULL_BLOCKS:
-            kv_indices = FULL_KV_IDX + sparse_kv_idx_offset
-            kv_num_blocks = tl.load(FULL_KV_NUM_BLKS + sparse_kv_num_blks_offset)
-            block_n_end = tl.minimum(kv_num_blocks * SPARSE_KV_MULTIPLE, tl.maximum(tl.cdiv(KV_LEN, BLOCK_N), 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
-
-            for start_n in range(0, block_n_end):
-                blk_idx_in_list = start_n // SPARSE_KV_MULTIPLE
-                kv_block = tl.load(kv_indices + blk_idx_in_list)
-                kv_start = kv_block * SPARSE_KV_BLOCK_SIZE + (start_n % SPARSE_KV_MULTIPLE) * BLOCK_N
-
-                offs_n_load = kv_start + tl.arange(0, BLOCK_N)
-                k = tl.load(
-                    K_ptr + offs_n_load[:, None] * stride_kn + offs_k[None, :] * stride_kk,
-                    mask=(offs_n_load[:, None] < KV_LEN),
-                    other=0.0
-                )
-                v = tl.load(
-                    V_ptr + offs_n_load[:, None] * stride_vn + offs_v[None, :] * stride_vk,
-                    mask=(offs_n_load[:, None] < KV_LEN),
-                    other=0.0
-                )
-                k = tl.trans(k)
-
-                qk = tl.dot(q, k, input_precision="ieee")
-                qk *= SM_SCALE
-
-                m_ij = tl.maximum(m_i, tl.max(qk, 1, propagate_nan=True), propagate_nan=tl.PropagateNan.ALL)
-                alpha = tl.math.exp(m_i - m_ij)
-                p = tl.math.exp(qk - m_ij[:, None])
-
-                pv = tl.dot(p.to(Q.dtype.element_ty), v, input_precision="ieee")
-                l_i = l_i * alpha + tl.sum(p, 1)
-                acc = acc * alpha[:, None] + pv
-                m_i = m_ij
+        
         l_i = tl.where(l_i == 0.0, 1.0, l_i)
         acc = acc / l_i[:, None]
 
