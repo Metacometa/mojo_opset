@@ -95,7 +95,7 @@ def _classify_stripe_blocks(stripe_mask, Q_BLOCK_SIZE, KV_BLOCK_SIZE):
 
 
 def _pack_stripe_partial_blocks(
-    stripe_mask, flags, qs_block, Q_BLOCK_SIZE, KV_BLOCK_SIZE, running_total, partial_block_table
+    stripe_mask, flags, qs_block, Q_BLOCK_SIZE, KV_BLOCK_SIZE, running_total, partial_block_table, num_partial=None
 ):
     """Extract partial blocks from a stripe into the packed cache.
 
@@ -108,7 +108,8 @@ def _pack_stripe_partial_blocks(
         num_partial:  count of partial blocks in this stripe.
     """
     partial_bool = flags == 1
-    num_partial = int(partial_bool.sum().item())
+    if num_partial is None:
+        num_partial = int(partial_bool.sum().item())
     if num_partial == 0:
         empty = torch.zeros((0, Q_BLOCK_SIZE, KV_BLOCK_SIZE), dtype=torch.bool, device=stripe_mask.device)
         return (empty, 0)
@@ -216,6 +217,7 @@ def create_block_mask_patched(
     global_per_row_count = torch.zeros(Q_num_blocks, dtype=torch.int32, device=device)
     packed_tiles_list = []
     running_total = 0
+    has_full_blocks = False
     for qs_block in range(0, Q_num_blocks, stripe_q_blocks):
         qe_block = min(qs_block + stripe_q_blocks, Q_num_blocks)
         q_start = qs_block * Q_BLOCK_SIZE
@@ -231,8 +233,17 @@ def create_block_mask_patched(
         partial_bool = flags == 1
         per_row_count = partial_bool.to(torch.int32).cumsum(dim=-1).max(dim=-1).values
         global_per_row_count[qs_block:qe_block] = per_row_count.to(torch.int32)
+        stripe_partial, stripe_full = torch.stack([partial_bool.sum(), (flags == 2).sum()]).tolist()
+        has_full_blocks = has_full_blocks or stripe_full > 0
         packed_tiles, num_partial = _pack_stripe_partial_blocks(
-            stripe_mask, flags, qs_block, Q_BLOCK_SIZE, KV_BLOCK_SIZE, running_total, partial_block_table
+            stripe_mask,
+            flags,
+            qs_block,
+            Q_BLOCK_SIZE,
+            KV_BLOCK_SIZE,
+            running_total,
+            partial_block_table,
+            num_partial=stripe_partial,
         )
         packed_tiles_list.append(packed_tiles)
         running_total += num_partial
@@ -252,6 +263,7 @@ def create_block_mask_patched(
         Q_BLOCK_SIZE,
         KV_BLOCK_SIZE,
     )
+    packed_block_mask.has_full_blocks = has_full_blocks
     del block_flags, global_per_row_count
     return packed_block_mask
 

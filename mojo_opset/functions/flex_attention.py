@@ -30,6 +30,7 @@ _MASK_METADATA = (
     "BLOCK_SIZE",
     "seq_lengths",
     "mask_mod",
+    "has_full_blocks",
     "task_list_max_sub",
     "task_list_sparse_kv_block_size",
     "task_list_num_kv_heads",

@@ -908,6 +908,11 @@ def bwd_dkdv_block_mn(
     )
 
 
+def _resolve_has_full_blocks(block_mask) -> bool:
+    has_full = getattr(block_mask, "has_full_blocks", None)
+    return True if has_full is None else bool(has_full)
+
+
 def _prepare_block_mask_attrs(
     block_mask,
     q,
@@ -918,8 +923,13 @@ def _prepare_block_mask_attrs(
 ):
     kv_num_blks = block_mask.kv_num_blocks
     kv_idx = block_mask.kv_indices
-    full_kv_num_blks = getattr(block_mask, "full_kv_num_blocks", torch.zeros_like(kv_num_blks))
-    full_kv_idx = getattr(block_mask, "full_kv_indices", torch.zeros_like(kv_idx))
+    has_full_blocks = _resolve_has_full_blocks(block_mask)
+    full_kv_num_blks = getattr(block_mask, "full_kv_num_blocks", None)
+    if full_kv_num_blks is None:
+        full_kv_num_blks = torch.zeros_like(kv_num_blks)
+    full_kv_idx = getattr(block_mask, "full_kv_indices", None)
+    if full_kv_idx is None:
+        full_kv_idx = torch.zeros_like(kv_idx)
 
     q_num_blks = getattr(block_mask, "q_num_blocks", None)
     q_idx = getattr(block_mask, "q_indices", None)
@@ -932,8 +942,12 @@ def _prepare_block_mask_attrs(
             "NPU FlexAttention currently supports only batch/head-independent BlockMask tensors "
             "with leading shape [1, 1]"
         )
-    full_q_num_blks = getattr(block_mask, "full_q_num_blocks", torch.zeros_like(q_num_blks))
-    full_q_idx = getattr(block_mask, "full_q_indices", torch.zeros_like(q_idx))
+    full_q_num_blks = getattr(block_mask, "full_q_num_blocks", None)
+    if full_q_num_blks is None:
+        full_q_num_blks = torch.zeros_like(q_num_blks)
+    full_q_idx = getattr(block_mask, "full_q_indices", None)
+    if full_q_idx is None:
+        full_q_idx = torch.zeros_like(q_idx)
 
     kv_num_blks = kv_num_blks.to(torch.int32).contiguous()
     kv_idx = kv_idx.to(torch.int32).contiguous()
@@ -1035,6 +1049,7 @@ def _prepare_block_mask_attrs(
         "partial_mask_offsets": partial_mask_offsets,
         "partial_block_table": partial_block_table,
         "use_packed_partial_mask": use_packed_partial_mask,
+        "has_full_blocks": has_full_blocks,
     }
 
 
@@ -1103,7 +1118,7 @@ def flex_attention_fwd_impl(
     num_tasks = num_q_blocks * Z * Hq
     grid, num_tasks = _persistent_launch_config(num_tasks)
 
-    _flex_attention_v2_forward_leaf([q, k, v, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets']], [output, lse], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), output.stride(0), output.stride(1), output.stride(2), output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), bm['kv_idx'].stride(2), D, Dv, BLOCK_M, BLOCK_N, num_tasks, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask']], list(grid))
+    _flex_attention_v2_forward_leaf([q, k, v, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets']], [output, lse], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), output.stride(0), output.stride(1), output.stride(2), output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), bm['kv_idx'].stride(2), D, Dv, BLOCK_M, BLOCK_N, num_tasks, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid))
 
     return output, lse
 
@@ -1144,14 +1159,14 @@ def flex_attention_bwd_impl(
     BLOCK_N_DQ = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DQ
     grid_dq, num_tasks_dq = _persistent_launch_config(num_q_blocks * Z * Hq)
-    _flex_attention_v2_dq_leaf([q, k, v, grad_output, lse, delta, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table']], [dq], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3), bm['kv_idx'].stride(2), D, Dv, BLOCK_M_DQ, BLOCK_N_DQ, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dq, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask']], list(grid_dq))
+    _flex_attention_v2_dq_leaf([q, k, v, grad_output, lse, delta, bm['kv_num_blks'], bm['kv_idx'], bm['full_kv_num_blks'], bm['full_kv_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table']], [dq], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3), bm['kv_idx'].stride(2), D, Dv, BLOCK_M_DQ, BLOCK_N_DQ, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dq, num_q_blocks, Hq, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid_dq))
 
     BLOCK_M_DKDV = TILE_BLOCK_SIZE
     BLOCK_N_DKDV = TILE_BLOCK_SIZE
     NUM_KV_SUB_BLOCKS_VAL = SPARSE_KV_BLOCK_SIZE // BLOCK_N_DKDV
     num_kv_blocks = triton.cdiv(N, SPARSE_KV_BLOCK_SIZE)
     grid_dkv, num_tasks_dkv = _persistent_launch_config(num_kv_blocks * Z * Hkv)
-    _flex_attention_v2_dkdv_leaf([q, k, v, grad_output, lse, delta, bm['q_num_blks'], bm['q_idx'], bm['full_q_num_blks'], bm['full_q_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table'], dq], [dk, dv], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3), dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3), bm['q_idx'].stride(2), D, Dv, BLOCK_M_DKDV, BLOCK_N_DKDV, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dkv, num_kv_blocks, Hkv, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask']], list(grid_dkv))
+    _flex_attention_v2_dkdv_leaf([q, k, v, grad_output, lse, delta, bm['q_num_blks'], bm['q_idx'], bm['full_q_num_blks'], bm['full_q_idx'], bm['dense_mask'], bm['packed_partial_mask'], bm['partial_mask_offsets'], bm['partial_block_table'], dq], [dk, dv], [bm['dense_mask'].stride(2), bm['dense_mask'].stride(3), bm['packed_partial_mask'].stride(0), bm['packed_partial_mask'].stride(1), bm['packed_partial_mask'].stride(2), bm['partial_mask_offsets'].stride(2), bm['partial_block_table'].stride(0), bm['partial_block_table'].stride(1), q.stride(0), q.stride(1), q.stride(2), q.stride(3), k.stride(0), k.stride(1), k.stride(2), k.stride(3), v.stride(0), v.stride(1), v.stride(2), v.stride(3), grad_output.stride(0), grad_output.stride(1), grad_output.stride(2), grad_output.stride(3), lse.stride(0), lse.stride(1), lse.stride(2), delta.stride(0), delta.stride(1), delta.stride(2), dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3), dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3), bm['q_idx'].stride(2), D, Dv, BLOCK_M_DKDV, BLOCK_N_DKDV, NUM_KV_SUB_BLOCKS_VAL, num_tasks_dkv, num_kv_blocks, Hkv, SPARSE_Q_BLOCK_SIZE, SPARSE_KV_BLOCK_SIZE, M, N, GQA_SHARED_HEADS], [sm_scale], [bm['use_packed_partial_mask'], bm['has_full_blocks']], list(grid_dkv))
 
     return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype)
 
@@ -1999,7 +2014,7 @@ def _flex_attention_v2_forward_leaf(inputs: list[torch.Tensor], outputs: list[to
         Q_LEN=integers[35],
         KV_LEN=integers[36],
         GQA_SHARED_HEADS=integers[37],
-        HAS_FULL_BLOCKS=True,
+        HAS_FULL_BLOCKS=flags[1],
         USE_PACKED_PARTIAL_MASK=flags[0],
         limit_auto_multi_buffer_buffer='no-limit',
         hfusion_enable_multiple_consumer_fusion=True,
@@ -2085,7 +2100,7 @@ def _flex_attention_v2_dq_leaf(inputs: list[torch.Tensor], outputs: list[torch.T
         Q_LEN=integers[45],
         KV_LEN=integers[46],
         GQA_SHARED_HEADS=integers[47],
-        HAS_FULL_BLOCKS=True,
+        HAS_FULL_BLOCKS=flags[1],
         USE_PACKED_PARTIAL_MASK=flags[0],
         limit_auto_multi_buffer_buffer='no-limit',
         hfusion_enable_multiple_consumer_fusion=True,
@@ -2176,7 +2191,7 @@ def _flex_attention_v2_dkdv_leaf(inputs: list[torch.Tensor], outputs: list[torch
         Q_LEN=integers[49],
         KV_LEN=integers[50],
         GQA_SHARED_HEADS=integers[51],
-        HAS_FULL_BLOCKS=True,
+        HAS_FULL_BLOCKS=flags[1],
         USE_PACKED_PARTIAL_MASK=flags[0],
         limit_auto_multi_buffer_buffer='no-limit',
         hfusion_enable_multiple_consumer_fusion=True,
