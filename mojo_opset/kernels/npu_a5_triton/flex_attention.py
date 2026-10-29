@@ -1519,7 +1519,7 @@ def flex_attention_fwd_impl(
 
     num_q_blocks = (M + SPARSE_Q_BLOCK_SIZE - 1) // SPARSE_Q_BLOCK_SIZE
 
-    output = torch.empty_like(q)
+    output = torch.empty((Z, Hq, M, Dv), dtype=q.dtype, device=q.device)
     lse = torch.empty((Z, Hq, M), dtype=torch.float32, device=q.device)
 
     q = q.contiguous()
