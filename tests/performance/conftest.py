@@ -19,6 +19,7 @@ from mojo_opset import Target
 from mojo_opset import config
 from mojo_opset.functions._dispatch import resolve_implementation
 from mojo_opset.utils import target as target_utils
+from mojo_opset.utils._exports import additions
 from tests._fixtures import check_implementation
 
 from ._adapters import load_platform
@@ -119,6 +120,12 @@ def perf_environment(pytestconfig, request):
 @pytest.fixture
 def benchmark(request, perf_environment, monkeypatch):
     adapter, device, target, implementation = perf_environment
+    for marker in request.node.iter_markers("api"):
+        op_ids = set(marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args)))
+        check_implementation(op_ids, implementation, target)
+    private = additions("tests")
+    if private is not None:
+        private.check_case(request, implementation, target)
     monkeypatch.setattr(target_utils, "_AUTO_TARGET", Target.parse(target))
     torch.manual_seed(42)
     report = request.config._mojo_perf_report

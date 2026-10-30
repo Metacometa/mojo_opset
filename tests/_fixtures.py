@@ -6,6 +6,7 @@ import torch
 from mojo_opset import Target
 from mojo_opset.functions import _dispatch
 from mojo_opset.utils import target as target_utils
+from mojo_opset.utils._exports import additions
 
 
 def _bindings(package, target):
@@ -80,6 +81,9 @@ def operator_test(request, monkeypatch):
         for marker in markers:
             op_ids = set(marker.kwargs.get("ops", (api.removeprefix("functions.") for api in marker.args)))
             check_implementation(op_ids, implementation, target)
+        private = additions("tests")
+        if private is not None:
+            private.check_case(request, implementation, target)
     monkeypatch.setattr(target_utils, "_AUTO_TARGET", Target.parse(target))
     # Apply the same FP32 math policy to candidate and reference, then restore it.
     # These flags do not change input dtypes or production/performance defaults.
